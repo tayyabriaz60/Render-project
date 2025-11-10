@@ -22,10 +22,20 @@ python -c "import secrets; print(secrets.token_urlsafe(64))"
    pip install -r requirements.txt
    ```
 
-2. Create a `.env` file in the project root with:
+2. Create a `.env` file in the project root (full example):
    ```env
+   # Core
+   SECRET_KEY=REPLACE_WITH_A_LONG_RANDOM_SECRET
    GOOGLE_API_KEY=YOUR_GOOGLE_API_KEY
    DATABASE_URL=postgresql+asyncpg://postgres:password@localhost/feedback_db
+
+   # Bootstrap first admin (created automatically if no users exist)
+   ADMIN_EMAIL=admin@example.com
+   ADMIN_PASSWORD=StrongPass123
+
+   # Local dev server behavior
+   AUTO_OPEN_BROWSER=1
+   PORT=8000
    ```
 
 3. Create the PostgreSQL database (via psql or pgAdmin):
