@@ -45,7 +45,7 @@ python -c "import secrets; print(secrets.token_urlsafe(64))"
 
 4. Run the server (Socket.IO enabled). The browser will auto-open:
    ```bash
-   uvicorn app.main:asgi_app --reload --host 127.0.0.1 --port 8000
+   uvicorn main:asgi_app --reload --host 127.0.0.1 --port 8000
    ```
    
    The API will be available at:
@@ -57,7 +57,7 @@ python -c "import secrets; print(secrets.token_urlsafe(64))"
 Optional:
 - Disable auto-open browser: set `AUTO_OPEN_BROWSER=0`
 - Change port (and auto-open target): set `PORT=9000` and run with `--port 9000`
-- FastAPI only (no Socket.IO): `uvicorn app.main:app --reload --host 0.0.0.0 --port 8000`
+- FastAPI only (no Socket.IO): `uvicorn main:app --reload --host 0.0.0.0 --port 8000`
 
 ## Authentication (Staff/Admin)
 
@@ -163,14 +163,15 @@ Recommended production checklist:
 ## Project Structure
 
 ```
-app/
-├── main.py              # FastAPI app initialization
-├── routers/             # API routes
-├── services/            # Business logic
-├── models/              # Database models
-├── sockets/             # Socket.IO events
-├── utils/               # Utilities
-└── db.py                # Database connection
+├── main.py              # FastAPI app initialization (root level)
+├── app/
+│   ├── routers/         # API routes
+│   ├── services/        # Business logic
+│   ├── models/          # Database models
+│   ├── sockets/         # Socket.IO events
+│   ├── utils/           # Utilities
+│   └── db.py            # Database connection
+└── frontend/            # Frontend files (HTML, CSS, JS)
 ```
 
 Notes:

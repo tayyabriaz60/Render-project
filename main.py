@@ -108,7 +108,8 @@ app.include_router(analytics.router)
 app.include_router(auth_router.router)
 app.include_router(health.router)
 
-frontend_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
+# Frontend path - main.py is now in root directory
+frontend_path = os.path.join(os.path.dirname(__file__), "frontend")
 if os.path.exists(frontend_path):
     app.mount("/static", StaticFiles(directory=frontend_path), name="static")
 
@@ -156,7 +157,7 @@ if __name__ == "__main__":  # pragma: no cover
     import uvicorn
 
     uvicorn.run(
-        "app.main:asgi_app",
+        "main:asgi_app",
         host="0.0.0.0",
         port=int(os.getenv("PORT", "8000")),
         reload=True,
