@@ -5,6 +5,20 @@ const API_BASE = 'http://127.0.0.1:8000';
 const token = localStorage.getItem('access_token');
 const socket = io(API_BASE, token ? { auth: { token: `Bearer ${token}` } } : {});
 
+const SENTIMENT_CLASSES = ['positive', 'negative', 'neutral', 'mixed'];
+const URGENCY_CLASSES = ['critical', 'high', 'medium', 'low'];
+
+const SecurityUtils = {
+    escapeHtml(text = '') {
+        const div = document.createElement('div');
+        div.textContent = text ?? '';
+        return div.innerHTML;
+    },
+    safeClass(value, allowed = []) {
+        return allowed.includes(value) ? value : '';
+    }
+};
+
 function redirectToLogin() {
     try { localStorage.removeItem('access_token'); } catch {}
     showAlert('Session expired. Redirecting to staff login...', 'error');
@@ -77,9 +91,19 @@ document.addEventListener('DOMContentLoaded', () => {
     if (document.getElementById('dashboardTab').classList.contains('active')) {
         loadFeedback();
     }
+    if (document.getElementById('urgentTab').classList.contains('active')) {
+        loadUrgentFeedback();
+    }
     if (document.getElementById('analyticsTab').classList.contains('active')) {
         loadAnalytics();
     }
+    
+    // Auto-refresh urgent tab every 30 seconds if it's active
+    setInterval(() => {
+        if (document.getElementById('urgentTab').classList.contains('active')) {
+            loadUrgentFeedback();
+        }
+    }, 30000); // 30 seconds
 
     // Socket.IO event listeners
     socket.on('connect', () => {
@@ -92,6 +116,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (document.getElementById('dashboardTab').classList.contains('active')) {
             loadFeedback();
         }
+        // Note: new_feedback doesn't auto-refresh urgent tab since it may not be critical yet
     });
 
     socket.on('urgent_alert', (data) => {
@@ -100,12 +125,20 @@ document.addEventListener('DOMContentLoaded', () => {
         if (document.getElementById('dashboardTab').classList.contains('active')) {
             loadFeedback();
         }
+        // Auto-refresh urgent tab if it's currently active
+        if (document.getElementById('urgentTab').classList.contains('active')) {
+            loadUrgentFeedback();
+        }
     });
 
     socket.on('analysis_complete', (data) => {
         showAlert(`Analysis complete for feedback #${data.feedback_id}`, 'success');
         if (document.getElementById('dashboardTab').classList.contains('active')) {
             loadFeedback();
+        }
+        // If analysis completes and it's critical, refresh urgent tab if active
+        if (document.getElementById('urgentTab').classList.contains('active')) {
+            loadUrgentFeedback();
         }
     });
 });
@@ -127,6 +160,9 @@ function showTab(tabName) {
     // Load data if needed
     if (tabName === 'dashboard') {
         loadFeedback();
+    } else if (tabName === 'urgent') {
+        console.log('Urgent tab activated - loading urgent feedback');
+        loadUrgentFeedback();
     } else if (tabName === 'analytics') {
         loadAnalytics();
     }
@@ -234,7 +270,7 @@ async function loadFeedback() {
             tableBody.innerHTML = '<tr><td colspan="9" class="loading">No feedback found</td></tr>';
         }
     } catch (error) {
-        tableBody.innerHTML = `<tr><td colspan="9" class="loading">Error loading feedback: ${error.message}</td></tr>`;
+        tableBody.innerHTML = `<tr><td colspan="9" class="loading">Error loading feedback: ${SecurityUtils.escapeHtml(error.message || 'Unknown error')}</td></tr>`;
     }
 }
 
@@ -248,25 +284,31 @@ function createFeedbackTableRow(feedback) {
     const feedbackPreview = feedback.feedback_text.length > 100 
         ? feedback.feedback_text.substring(0, 100) + '...' 
         : feedback.feedback_text;
+    const safeSentimentClass = SecurityUtils.safeClass(feedback.sentiment || '', SENTIMENT_CLASSES);
+    const safeUrgencyClass = SecurityUtils.safeClass(feedback.urgency || '', URGENCY_CLASSES);
 
     row.innerHTML = `
-        <td>#${feedback.id}</td>
-        <td>${feedback.patient_name || 'Anonymous'}</td>
-        <td>${feedback.department}</td>
-        <td>${feedbackPreview}</td>
+        <td>#${SecurityUtils.escapeHtml(String(feedback.id))}</td>
+        <td>${SecurityUtils.escapeHtml(feedback.patient_name || 'Anonymous')}</td>
+        <td>${SecurityUtils.escapeHtml(feedback.department)}</td>
+        <td>${SecurityUtils.escapeHtml(feedbackPreview)}</td>
         <td>
             <span class="badge">${feedback.rating}/5</span>
         </td>
         <td>
-            <span class="badge">${feedback.status || 'pending'}</span>
+            <span class="badge">${SecurityUtils.escapeHtml(feedback.status || 'pending')}</span>
         </td>
         <td>
-            ${feedback.sentiment ? `<span class="badge ${feedback.sentiment}">${feedback.sentiment}</span>` : 
-              feedback.analysis_status === 'pending' ? '<span class="badge" style="background: #fef3c7; color: #92400e;">Analyzing...</span>' : '-'}
+            ${feedback.sentiment ? `<span class="badge ${safeSentimentClass}">${SecurityUtils.escapeHtml(feedback.sentiment)}</span>` : 
+              feedback.status === 'analysis_failed' ? '<span class="badge" style="background: #fee2e2; color: #991b1b;">Analysis Failed</span>' :
+              feedback.analysis_status === 'pending' ? '<span class="badge" style="background: #fef3c7; color: #92400e;">Analyzing...</span>' : 
+              '<span class="badge" style="background: #e5e7eb; color: #6b7280;">Pending</span>'}
         </td>
         <td>
-            ${feedback.urgency ? `<span class="badge ${feedback.urgency}">${feedback.urgency}</span>` : 
-              feedback.analysis_status === 'pending' ? '<span class="badge" style="background: #fef3c7; color: #92400e;">Analyzing...</span>' : '-'}
+            ${feedback.urgency ? `<span class="badge ${safeUrgencyClass}">${SecurityUtils.escapeHtml(feedback.urgency)}</span>` : 
+              feedback.status === 'analysis_failed' ? '<span class="badge" style="background: #fee2e2; color: #991b1b;">Analysis Failed</span>' :
+              feedback.analysis_status === 'pending' ? '<span class="badge" style="background: #fef3c7; color: #92400e;">Analyzing...</span>' : 
+              '<span class="badge" style="background: #e5e7eb; color: #6b7280;">Pending</span>'}
         </td>
         <td>
             <div class="action-buttons">
@@ -276,6 +318,11 @@ function createFeedbackTableRow(feedback) {
                 <button class="btn btn-small btn-action" onclick="openActionModal(${feedback.id})">
                     <i class="fas fa-tasks"></i> Action
                 </button>
+                ${feedback.status === 'analysis_failed' ? `
+                    <button class="btn btn-small" style="background: #f59e0b; color: white;" onclick="retryAnalysis(${feedback.id})" title="Retry AI Analysis">
+                        <i class="fas fa-redo"></i> Retry
+                    </button>
+                ` : ''}
             </div>
         </td>
     `;
@@ -286,16 +333,40 @@ function createFeedbackTableRow(feedback) {
 // Load urgent feedback
 async function loadUrgentFeedback() {
     const container = document.getElementById('urgentFeedbackList');
+    if (!container) {
+        console.error('urgentFeedbackList container not found');
+        return;
+    }
+    
     container.innerHTML = '<div class="loading">Loading urgent feedback...</div>';
 
     try {
         const headers = {};
-        if (token) headers['Authorization'] = `Bearer ${token}`;
+        if (token) {
+            headers['Authorization'] = `Bearer ${token}`;
+        } else {
+            console.warn('No token found - urgent feedback requires authentication');
+            container.innerHTML = '<div class="loading">Please login to view urgent feedback</div>';
+            return;
+        }
+        
+        console.log('Fetching urgent feedback from:', `${API_BASE}/feedback/urgent?limit=100`);
         const response = await fetch(`${API_BASE}/feedback/urgent?limit=100`, { headers });
-        const data = await response.json();
+        
         if (response.status === 401) {
+            console.error('Unauthorized - redirecting to login');
             return redirectToLogin();
         }
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('Failed to load urgent feedback:', response.status, errorText);
+            container.innerHTML = `<div class="loading">Error loading urgent feedback: ${response.status} ${response.statusText}</div>`;
+            return;
+        }
+        
+        const data = await response.json();
+        console.log('Urgent feedback response:', data);
 
         if (data.urgent_feedbacks && data.urgent_feedbacks.length > 0) {
             container.innerHTML = '';
@@ -303,11 +374,14 @@ async function loadUrgentFeedback() {
                 const item = createUrgentFeedbackItem(feedback);
                 container.appendChild(item);
             });
+            console.log(`Loaded ${data.urgent_feedbacks.length} urgent feedback items`);
         } else {
             container.innerHTML = '<div class="loading">No urgent feedback found</div>';
+            console.log('No urgent feedback found in response');
         }
     } catch (error) {
-        container.innerHTML = `<div class="loading">Error loading urgent feedback: ${error.message}</div>`;
+        console.error('Exception loading urgent feedback:', error);
+        container.innerHTML = `<div class="loading">Error loading urgent feedback: ${SecurityUtils.escapeHtml(error.message || 'Unknown error')}</div>`;
     }
 }
 
@@ -317,34 +391,35 @@ function createUrgentFeedbackItem(feedback) {
     item.className = 'feedback-item critical';
 
     const flags = feedback.urgency_flags && feedback.urgency_flags.length > 0
-        ? feedback.urgency_flags.map(flag => `<span class="badge critical">${flag}</span>`).join(' ')
+        ? feedback.urgency_flags.map(flag => `<span class="badge critical">${SecurityUtils.escapeHtml(flag)}</span>`).join(' ')
         : '';
+    const safeSentimentClass = SecurityUtils.safeClass(feedback.sentiment || '', SENTIMENT_CLASSES);
 
     item.innerHTML = `
         <div class="feedback-header">
             <div>
-                <h3>🚨 Critical: ${feedback.patient_name || 'Anonymous'} - ${feedback.department}</h3>
+                <h3>🚨 Critical: ${SecurityUtils.escapeHtml(feedback.patient_name || 'Anonymous')} - ${SecurityUtils.escapeHtml(feedback.department)}</h3>
                 <div class="feedback-meta">
                     <span class="badge critical">CRITICAL</span>
-                    ${feedback.sentiment ? `<span class="badge ${feedback.sentiment}">${feedback.sentiment}</span>` : ''}
+                    ${feedback.sentiment ? `<span class="badge ${safeSentimentClass}">${SecurityUtils.escapeHtml(feedback.sentiment)}</span>` : ''}
                     <span class="badge">Rating: ${feedback.rating}/5</span>
                     ${flags}
                 </div>
             </div>
         </div>
         <div class="feedback-text">
-            <strong>Urgency Reason:</strong> ${feedback.urgency_reason || 'Not specified'}<br><br>
-            <strong>Feedback:</strong> ${feedback.feedback_text}
+            <strong>Urgency Reason:</strong> ${SecurityUtils.escapeHtml(feedback.urgency_reason || 'Not specified')}<br><br>
+            <strong>Feedback:</strong> ${SecurityUtils.escapeHtml(feedback.feedback_text)}
         </div>
         ${feedback.actionable_insights ? `
             <div style="margin-top: 15px; padding: 15px; background: #fef3c7; border-radius: 8px;">
-                <strong>Actionable Insights:</strong> ${feedback.actionable_insights}
+                <strong>Actionable Insights:</strong> ${SecurityUtils.escapeHtml(feedback.actionable_insights)}
             </div>
         ` : ''}
         <div class="feedback-footer">
             <span><i class="fas fa-calendar"></i> ${new Date(feedback.visit_date).toLocaleDateString()}</span>
-            <span><i class="fas fa-user-md"></i> ${feedback.doctor_name || 'N/A'}</span>
-            <span><i class="fas fa-tag"></i> ${feedback.primary_category || 'Uncategorized'}</span>
+            <span><i class="fas fa-user-md"></i> ${SecurityUtils.escapeHtml(feedback.doctor_name || 'N/A')}</span>
+            <span><i class="fas fa-tag"></i> ${SecurityUtils.escapeHtml(feedback.primary_category || 'Uncategorized')}</span>
             <div class="action-buttons">
                 <button class="btn btn-small btn-view" onclick="viewFeedback(${feedback.id})">
                     <i class="fas fa-eye"></i> View Details
@@ -368,8 +443,8 @@ function showCriticalAlert(data) {
         <i class="fas fa-exclamation-triangle"></i>
         <div class="critical-alert-content">
             <h3>🚨 Critical Feedback Alert</h3>
-            <p><strong>${data.feedback_preview}</strong></p>
-            <p>Department: ${data.department} | Reason: ${data.urgency_reason}</p>
+            <p><strong>${SecurityUtils.escapeHtml(data.feedback_preview)}</strong></p>
+            <p>Department: ${SecurityUtils.escapeHtml(data.department)} | Reason: ${SecurityUtils.escapeHtml(data.urgency_reason || '')}</p>
         </div>
         <button class="btn btn-secondary" onclick="viewFeedback(${data.feedback_id})">
             View Details
@@ -421,6 +496,10 @@ document.getElementById('actionForm').addEventListener('submit', async (e) => {
             showAlert('Action saved successfully!', 'success');
             closeActionModal();
             loadFeedback();
+            // Also refresh urgent tab if it's active
+            if (document.getElementById('urgentTab').classList.contains('active')) {
+                loadUrgentFeedback();
+            }
         } else {
             const error = await response.json();
             if (response.status === 401) return redirectToLogin();
@@ -448,35 +527,38 @@ async function viewFeedback(id) {
         let analysisHtml = '';
         if (feedback.analysis) {
             const a = feedback.analysis;
+            const safeSentiment = SecurityUtils.escapeHtml(a.sentiment || '');
+            const sentimentClass = SecurityUtils.safeClass(a.sentiment || '', SENTIMENT_CLASSES);
+            const urgencyClass = SecurityUtils.safeClass(a.urgency || '', URGENCY_CLASSES);
             analysisHtml = `
                 <div class="analytics-section">
                     <h3>AI Analysis</h3>
                     <div class="stats-grid">
                         <div class="stat-card">
-                            <div class="stat-icon ${a.sentiment === 'positive' ? 'positive' : a.sentiment === 'negative' ? 'negative' : ''}">
+                            <div class="stat-icon ${sentimentClass}">
                                 <i class="fas fa-brain"></i>
                             </div>
                             <div class="stat-info">
-                                <h3>${a.sentiment}</h3>
+                                <h3>${safeSentiment}</h3>
                                 <p>Sentiment (${(a.confidence_score * 100).toFixed(0)}% confidence)</p>
                             </div>
                         </div>
                         <div class="stat-card">
-                            <div class="stat-icon ${a.urgency === 'critical' ? 'critical' : ''}">
+                            <div class="stat-icon ${urgencyClass === 'critical' ? 'critical' : ''}">
                                 <i class="fas fa-exclamation-triangle"></i>
                             </div>
                             <div class="stat-info">
-                                <h3>${a.urgency}</h3>
+                                <h3>${SecurityUtils.escapeHtml(a.urgency || '')}</h3>
                                 <p>Urgency Level</p>
                             </div>
                         </div>
                     </div>
-                    ${a.urgency_reason ? `<p><strong>Urgency Reason:</strong> ${a.urgency_reason}</p>` : ''}
-                    ${a.actionable_insights ? `<p><strong>Actionable Insights:</strong> ${a.actionable_insights}</p>` : ''}
+                    ${a.urgency_reason ? `<p><strong>Urgency Reason:</strong> ${SecurityUtils.escapeHtml(a.urgency_reason)}</p>` : ''}
+                    ${a.actionable_insights ? `<p><strong>Actionable Insights:</strong> ${SecurityUtils.escapeHtml(a.actionable_insights)}</p>` : ''}
                     ${a.key_points && a.key_points.length > 0 ? `
                         <h4>Key Points:</h4>
                         <ul>
-                            ${a.key_points.map(point => `<li>${point}</li>`).join('')}
+                            ${a.key_points.map(point => `<li>${SecurityUtils.escapeHtml(point)}</li>`).join('')}
                         </ul>
                     ` : ''}
                 </div>
@@ -486,14 +568,14 @@ async function viewFeedback(id) {
         modalBody.innerHTML = `
             <h2>Feedback Details #${feedback.id}</h2>
             <div class="card">
-                <p><strong>Patient:</strong> ${feedback.patient_name || 'Anonymous'}</p>
-                <p><strong>Department:</strong> ${feedback.department}</p>
-                <p><strong>Doctor:</strong> ${feedback.doctor_name || 'N/A'}</p>
+                <p><strong>Patient:</strong> ${SecurityUtils.escapeHtml(feedback.patient_name || 'Anonymous')}</p>
+                <p><strong>Department:</strong> ${SecurityUtils.escapeHtml(feedback.department)}</p>
+                <p><strong>Doctor:</strong> ${SecurityUtils.escapeHtml(feedback.doctor_name || 'N/A')}</p>
                 <p><strong>Visit Date:</strong> ${new Date(feedback.visit_date).toLocaleString()}</p>
                 <p><strong>Rating:</strong> ${feedback.rating}/5</p>
-                <p><strong>Status:</strong> ${feedback.status}</p>
+                <p><strong>Status:</strong> ${SecurityUtils.escapeHtml(feedback.status)}</p>
                 <h3>Feedback:</h3>
-                <p>${feedback.feedback_text}</p>
+                <p>${SecurityUtils.escapeHtml(feedback.feedback_text)}</p>
             </div>
             ${analysisHtml}
         `;
@@ -585,16 +667,47 @@ function showAlert(message, type = 'info') {
     const container = document.getElementById('alertContainer');
     const alert = document.createElement('div');
     alert.className = `alert ${type}`;
-    alert.innerHTML = `
-        <i class="fas fa-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle'}"></i>
-        <span>${message}</span>
-    `;
+    const icon = document.createElement('i');
+    icon.className = `fas fa-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle'}`;
+    const span = document.createElement('span');
+    span.textContent = message;
+    alert.appendChild(icon);
+    alert.appendChild(span);
     
     container.appendChild(alert);
     
     setTimeout(() => {
         alert.remove();
     }, 5000);
+}
+
+// Retry analysis for failed feedback
+async function retryAnalysis(feedbackId) {
+    try {
+        const headers = { 'Content-Type': 'application/json' };
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        
+        const response = await fetch(`${API_BASE}/feedback/${feedbackId}/retry-analysis`, {
+            method: 'POST',
+            headers
+        });
+        
+        if (response.ok) {
+            showAlert('Analysis retry initiated. Please wait...', 'success');
+            // Refresh after 3 seconds to see updated status
+            setTimeout(() => {
+                if (document.getElementById('dashboardTab').classList.contains('active')) {
+                    loadFeedback();
+                }
+            }, 3000);
+        } else {
+            const error = await response.json();
+            if (response.status === 401) return redirectToLogin();
+            showAlert(`Error: ${error.detail || 'Failed to retry analysis'}`, 'error');
+        }
+    } catch (error) {
+        showAlert(`Error: ${error.message}`, 'error');
+    }
 }
 
 // Initialize rating display

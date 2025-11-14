@@ -22,7 +22,7 @@ python -c "import secrets; print(secrets.token_urlsafe(64))"
    pip install -r requirements.txt
    ```
 
-2. Create a `.env` file in the project root (full example):
+2. Copy `env.example` to `.env` and replace placeholder values (never commit `.env`):
    ```env
    # Core
    SECRET_KEY=REPLACE_WITH_A_LONG_RANDOM_SECRET
@@ -84,6 +84,42 @@ Env keys:
 
 5. Test flow: Submit feedback → AI analysis runs in background → real-time notifications on dashboard.
 
+## Security Setup (Required)
+
+- Generate a secure secret: `python -c "import secrets; print(secrets.token_urlsafe(64))"` and add to `.env`.
+- Set a strong `ADMIN_PASSWORD` (12+ chars, mixed case/numbers/symbols).
+- Ensure `.env` is ignored by git (already configured) and never checked in.
+- Restrict CORS and Socket.IO origins in production (currently wide-open for local dev).
+- Rotate the secret key and database credentials if they ever leak.
+
+## Architecture Notes
+
+- FastAPI application with async SQLAlchemy sessions and connection pooling.
+- AI analysis performed via true async HTTP calls to the Gemini REST API.
+- Background tasks open their own database sessions to avoid lifecycle leaks.
+- Structured logging (console + rotating file) is enabled via `app/logging_config.py`.
+- CSV exports stream rows to avoid high memory usage on large datasets.
+
+## Deployment
+
+### Deploy to Render.com
+
+See [DEPLOYMENT.md](./DEPLOYMENT.md) for complete deployment instructions.
+
+**Quick Steps:**
+1. Push code to GitHub
+2. Create PostgreSQL database on Render
+3. Create Web Service on Render
+4. Set environment variables
+5. Deploy!
+
+**Important:** Make sure to set all required environment variables in Render dashboard:
+- `SECRET_KEY` (generate with: `python -c "import secrets; print(secrets.token_urlsafe(64))"`)
+- `GOOGLE_API_KEY`
+- `DATABASE_URL` (from Render PostgreSQL)
+- `ADMIN_EMAIL`
+- `ADMIN_PASSWORD`
+
 ## API Endpoints
 
 ### Feedback
@@ -97,6 +133,20 @@ Env keys:
 ### Analytics
 - `GET /analytics/summary` - Get analytics summary
 - `GET /analytics/trends` - Get trends data
+
+## Known Limitations & Future Improvements
+
+1. **Concurrent Load:** Optimized for dozens of concurrent staff users; use a task queue (Celery/Redis) for heavy Gemini workloads.
+2. **AI Rate Limits:** Gemini API quotas apply. Consider request throttling or a queue if users generate spikes.
+3. **Real-time Scaling:** Socket.IO runs in-process; add a shared adapter (Redis) before scaling horizontally.
+4. **Large Exports:** Streaming CSV handles thousands of rows, but prefer data warehouses for massive exports.
+5. **Testing:** Add automated unit/integration tests before production deployment.
+
+Recommended production checklist:
+- [ ] Configure HTTPS / reverse proxy.
+- [ ] Add monitoring & alerting (Prometheus, Grafana, etc.).
+- [ ] Set up log aggregation (ELK, Loki, CloudWatch).
+- [ ] Schedule database backups and apply migrations via Alembic.
 
 ## Socket.IO Events
 

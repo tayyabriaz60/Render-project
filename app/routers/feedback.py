@@ -1,20 +1,24 @@
 """
 Feedback API routes
 """
-from typing import Optional, List
+from typing import Iterator, List, Optional
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+import csv
+import io
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import get_db
-from app.models.feedback import Feedback
-from app.models.analysis import Analysis
+from app.db import AsyncSessionLocal, get_db
+from app.logging_config import get_logger
 from app.services.feedback_service import FeedbackService
 from app.utils.helpers import validate_rating
 from app.deps import require_role
 from app.sockets.events import emit_new_feedback, emit_urgent_alert, emit_analysis_complete
 
+logger = get_logger(__name__)
 router = APIRouter(prefix="/feedback", tags=["feedback"])
 
 
@@ -104,40 +108,33 @@ async def create_feedback(
         background_tasks.add_task(
             analyze_feedback_background,
             feedback_id=feedback.id,
-            db=db
         )
         
         return feedback
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error creating feedback: {str(e)}")
+        logger.exception("Failed to create feedback")
+        raise HTTPException(status_code=500, detail="Error creating feedback")
 
 
-async def analyze_feedback_background(feedback_id: int, db: AsyncSession):
+async def analyze_feedback_background(feedback_id: int):
     """Background task for analyzing feedback"""
-    try:
-        print(f"🔄 Starting AI analysis for feedback {feedback_id}...")
-        analysis = await FeedbackService.analyze_feedback_async(db, feedback_id)
-        
-        if analysis:
-            print(f"✅ Analysis saved for feedback {feedback_id}")
-            print(f"   Sentiment: {analysis.sentiment}, Urgency: {analysis.urgency}")
-            
-            # Emit analysis complete event
-            await emit_analysis_complete(feedback_id, analysis)
-            
-            # Check if urgent and emit alert
-            if analysis.urgency == "critical":
-                print(f"🚨 CRITICAL feedback detected: {feedback_id}")
-                feedback = await FeedbackService.get_feedback_by_id(db, feedback_id)
-                if feedback:
-                    await emit_urgent_alert(feedback, analysis)
-        else:
-            print(f"⚠️ Analysis failed or returned None for feedback {feedback_id}")
-    except Exception as e:
-        print(f"❌ Error in background analysis for feedback {feedback_id}: {e}")
-        import traceback
-        traceback.print_exc()
+    async with AsyncSessionLocal() as background_session:
+        try:
+            logger.info("Starting AI analysis for feedback %s", feedback_id)
+            analysis = await FeedbackService.analyze_feedback_async(background_session, feedback_id)
+            if analysis:
+                await emit_analysis_complete(feedback_id, analysis)
+                if analysis.urgency == "critical":
+                    feedback = await FeedbackService.get_feedback_by_id(background_session, feedback_id)
+                    if feedback:
+                        await emit_urgent_alert(feedback, analysis)
+            else:
+                await FeedbackService.mark_analysis_failed(background_session, feedback_id)
+                logger.error("Analysis failed for feedback %s", feedback_id)
+        except Exception as exc:  # pragma: no cover
+            logger.exception("Background analysis crashed for feedback %s", feedback_id)
+            await FeedbackService.mark_analysis_failed(background_session, feedback_id)
 
 
 @router.get("/all", response_model=dict, dependencies=[Depends(require_role("admin", "staff"))])
@@ -189,9 +186,9 @@ async def get_all_feedback(
                     "analysis_status": "completed" if feedback.analysis else "pending"
                 }
                 feedback_list.append(feedback_dict)
-            except Exception as e:
+            except Exception:
                 # Skip problematic feedback items
-                print(f"Error processing feedback {feedback.id}: {e}")
+                logger.exception("Error processing feedback %s", feedback.id)
                 continue
         
         response = {
@@ -203,46 +200,17 @@ async def get_all_feedback(
         
         # CSV export
         if format == "csv":
-            from fastapi.responses import Response
-            import csv
-            import io
-            
-            output = io.StringIO()
-            if feedback_list:
-                # Flatten nested data for CSV
-                csv_data = []
-                for item in feedback_list:
-                    csv_row = {
-                        "id": item.get("id"),
-                        "patient_name": item.get("patient_name") or "",
-                        "visit_date": item.get("visit_date") or "",
-                        "department": item.get("department") or "",
-                        "doctor_name": item.get("doctor_name") or "",
-                        "feedback_text": item.get("feedback_text") or "",
-                        "rating": item.get("rating"),
-                        "status": item.get("status") or "",
-                        "sentiment": item.get("sentiment") or "",
-                        "urgency": item.get("urgency") or "",
-                        "primary_category": item.get("primary_category") or "",
-                        "created_at": item.get("created_at") or ""
-                    }
-                    csv_data.append(csv_row)
-                
-                if csv_data:
-                    writer = csv.DictWriter(output, fieldnames=csv_data[0].keys())
-                    writer.writeheader()
-                    writer.writerows(csv_data)
-            
-            return Response(
-                content=output.getvalue(),
+            return StreamingResponse(
+                generate_feedback_csv(feedback_list),
                 media_type="text/csv",
-                headers={"Content-Disposition": "attachment; filename=feedback_export.csv"}
+                headers={"Content-Disposition": "attachment; filename=feedback_export.csv"},
             )
         
         return response
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching feedback: {str(e)}")
+        logger.exception("Failed to fetch feedback")
+        raise HTTPException(status_code=500, detail="Error fetching feedback")
 
 
 @router.get("/urgent", response_model=dict, dependencies=[Depends(require_role("admin", "staff"))])
@@ -280,16 +248,17 @@ async def get_urgent_feedback(
                     "actionable_insights": feedback.analysis.actionable_insights if feedback.analysis else None
                 }
                 feedback_list.append(feedback_dict)
-            except Exception as e:
-                print(f"Error processing feedback {feedback.id}: {e}")
+            except Exception:
+                logger.exception("Error processing urgent feedback %s", feedback.id)
                 continue
         
         return {
             "total": total,
             "urgent_feedbacks": feedback_list
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching urgent feedback: {str(e)}")
+    except Exception:
+        logger.exception("Failed to fetch urgent feedback")
+        raise HTTPException(status_code=500, detail="Error fetching urgent feedback")
 
 
 @router.get("/{feedback_id}", response_model=FeedbackDetailResponse, dependencies=[Depends(require_role("admin", "staff"))])
@@ -369,4 +338,72 @@ async def update_feedback(
         raise HTTPException(status_code=404, detail="Feedback not found")
     
     return feedback
+
+
+@router.post("/{feedback_id}/retry-analysis", response_model=dict, dependencies=[Depends(require_role("admin", "staff"))])
+async def retry_analysis(
+    feedback_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db)
+):
+    """Retry AI analysis for a feedback that failed"""
+    feedback = await FeedbackService.get_feedback_by_id(db, feedback_id)
+    if not feedback:
+        raise HTTPException(status_code=404, detail="Feedback not found")
+    
+    # Reset status if it was analysis_failed
+    if feedback.status == "analysis_failed":
+        feedback.status = "pending_analysis"
+        await db.commit()
+    
+    # Trigger background analysis
+    background_tasks.add_task(
+        analyze_feedback_background,
+        feedback_id=feedback_id,
+    )
+    
+    return {"message": "Analysis retry initiated", "feedback_id": feedback_id}
+
+
+def generate_feedback_csv(feedbacks: List[dict]) -> Iterator[str]:
+    """Stream feedback rows as CSV."""
+    buffer = io.StringIO()
+    fieldnames = [
+        "id",
+        "patient_name",
+        "visit_date",
+        "department",
+        "doctor_name",
+        "feedback_text",
+        "rating",
+        "status",
+        "sentiment",
+        "urgency",
+        "primary_category",
+        "created_at",
+    ]
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    yield buffer.getvalue()
+    buffer.seek(0)
+    buffer.truncate(0)
+
+    for item in feedbacks:
+        writer.writerow({
+            "id": item.get("id"),
+            "patient_name": item.get("patient_name") or "",
+            "visit_date": item.get("visit_date") or "",
+            "department": item.get("department") or "",
+            "doctor_name": item.get("doctor_name") or "",
+            "feedback_text": item.get("feedback_text") or "",
+            "rating": item.get("rating"),
+            "status": item.get("status") or "",
+            "sentiment": item.get("sentiment") or "",
+            "urgency": item.get("urgency") or "",
+            "primary_category": item.get("primary_category") or "",
+            "created_at": item.get("created_at") or "",
+        })
+        yield buffer.getvalue()
+        buffer.seek(0)
+        buffer.truncate(0)
 
